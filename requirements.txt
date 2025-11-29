@@ -1,0 +1,8 @@
+streamlit
+pandas
+reportlab
+arabic-reshaper
+python-bidi
+pydrive2
+
+
