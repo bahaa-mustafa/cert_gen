@@ -31,7 +31,7 @@ st.set_page_config(
     page_title="مولد الشهادات",
     page_icon="🎓",
     layout="centered",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"  # إخفاء sidebar
 )
 
 
@@ -57,7 +57,7 @@ def get_oauth_token():
     return None
 
 
-# دالة الاتصال بجوجل درايف باستخدام OAuth Token
+# دالة الاتصال بجوجل درايف باستخدام OAuth Token (بدون رسائل UI)
 @st.cache_resource
 def authenticate_drive():
     """
@@ -69,21 +69,6 @@ def authenticate_drive():
         token_info = get_oauth_token()
         
         if not token_info:
-            st.sidebar.error("❌ OAuth Token غير موجود")
-            with st.sidebar.expander("كيفية الإعداد"):
-                st.markdown("""
-                **للتنمية المحلية:**
-                1. شغّل: `python generate_token.py`
-                2. سجّل دخول بحساب Google
-                3. سيُنشأ ملف `token.json`
-                
-                **للنشر على Streamlit Cloud:**
-                1. ولّد token محلياً (الخطوة أعلاه)
-                2. انسخ محتوى `token.json`
-                3. أضفه في Streamlit Secrets
-                
-                راجع ملف `TOKEN_SETUP.md` للتفاصيل
-                """)
             return None
         
         # استخدام scope محدد للملفات فقط
@@ -101,23 +86,14 @@ def authenticate_drive():
                 if os.path.exists('token.json'):
                     with open('token.json', 'w') as token_file:
                         json.dump(token_json, token_file)
-                st.sidebar.info("🔄 تم تجديد Token تلقائياً")
-            except Exception as refresh_error:
-                st.sidebar.error("❌ فشل تجديد Token")
-                st.sidebar.caption(f"الخطأ: {refresh_error}")
-                st.sidebar.info("💡 جرّب توليد token جديد")
+            except Exception:
                 return None
         
         # بناء service object
         service = build('drive', 'v3', credentials=creds)
-        
-        st.sidebar.success("✅ متصل بالدرايف")
         return service
 
-    except Exception as e:
-        st.sidebar.error("❌ فشل الاتصال بالدرايف")
-        with st.sidebar.expander("عرض التفاصيل"):
-            st.caption(f"الخطأ: {e}")
+    except Exception:
         return None
 
 
@@ -143,16 +119,14 @@ def make_folder_public(service, folder_id: str):
             fields='id'
         ).execute()
         
-        st.sidebar.info("🔗 المجلد مشارك مع أي حد معاه الرابط")
         return True
         
-    except Exception as e:
+    except Exception:
         # ممكن يكون المجلد عام بالفعل
-        st.sidebar.caption(f"ملاحظة: {str(e)}")
         return False
 
 
-# دالة البحث عن مجلد أو إنشاؤه في Google Drive
+# دالة البحث عن مجلد أو إنشاؤه في Google Drive (بدون رسائل UI)
 def find_or_create_folder(service, folder_name: str):
     """
     البحث عن مجلد في Google Drive، وإنشاؤه إذا لم يكن موجوداً
@@ -176,11 +150,8 @@ def find_or_create_folder(service, folder_name: str):
         files = results.get('files', [])
         if files:
             folder_id = files[0]['id']
-            st.sidebar.success(f"✅ تم العثور على المجلد: {folder_name}")
-            
             # جعل المجلد عاماً (في حالة لم يكن كذلك)
             make_folder_public(service, folder_id)
-            
             return folder_id
         
         # المجلد غير موجود - إنشاؤه
@@ -195,34 +166,18 @@ def find_or_create_folder(service, folder_name: str):
         ).execute()
         
         folder_id = folder.get('id')
-        st.sidebar.success(f"✨ تم إنشاء المجلد الجديد: {folder_name}")
-        
         # جعل المجلد عاماً
         make_folder_public(service, folder_id)
         
         return folder_id
         
-    except Exception as e:
-        error_msg = str(e)
-        
-        # معالجة أخطاء SSL
-        if "SSL" in error_msg or "WRONG_VERSION_NUMBER" in error_msg:
-            st.sidebar.error("❌ خطأ في الاتصال بالإنترنت")
-            with st.sidebar.expander("حلول مقترحة"):
-                st.markdown("""
-                - تأكد من اتصالك بالإنترنت
-                - حاول إعادة تحميل الصفحة
-                - إذا كنت خلف Proxy، قد تحتاج لإعدادات إضافية
-                """)
-        else:
-            st.sidebar.error(f"❌ خطأ: {error_msg}")
-        
+    except Exception:
         return None
 
 
-# دالة توليد الشهادات والرفع
+# دالة توليد الشهادات والرفع (محسّنة ومستقرة)
 def generate_and_upload(df, template_path, drive, drive_folder_id, x_pos, y_pos, font_size):
-    # 1. إعداد مجلد مؤقت محلياً (لو حابب تستخدمه لاحقاً)
+    # 1. إعداد مجلد مؤقت محلياً
     if os.path.exists(FOLDER_NAME):
         shutil.rmtree(FOLDER_NAME)
     os.makedirs(FOLDER_NAME, exist_ok=True)
@@ -232,68 +187,98 @@ def generate_and_upload(df, template_path, drive, drive_folder_id, x_pos, y_pos,
 
     st.subheader("جاري إنشاء ورفع الشهادات...")
     progress_bar = st.progress(0)
+    status_text = st.empty()
     total = len(df)
-
+    
+    # ⚡ تحسين: قراءة القالب مرة واحدة كـ bytes
+    with open(template_path, 'rb') as f:
+        template_bytes = f.read()
+    
+    completed = 0
+    errors = []
+    
+    # معالجة كل شهادة واحدة تلو الأخرى (مستقر وموثوق)
     for index, row in df.iterrows():
-        # محاولة جلب الاسم من أول عمود
         try:
-            name = str(row.iloc[0])
-        except Exception:
-            name = f"مستخدم-{index + 1}"
+            # جلب الاسم
+            try:
+                name = str(row.iloc[0])
+            except Exception:
+                name = f"مستخدم-{index + 1}"
 
-        # معالجة النص العربي
-        reshaped_text = arabic_reshaper.reshape(name)
-        bidi_text = get_display(reshaped_text)
+            # معالجة النص العربي
+            reshaped_text = arabic_reshaper.reshape(name)
+            bidi_text = get_display(reshaped_text)
 
-        # إنشاء طبقة النص في PDF
-        text_layer = io.BytesIO()
-        c = canvas.Canvas(text_layer, pagesize=landscape(A4))
-        
-        # الكتابة على الطبقة الشفافة
-        c.setFont("ArabicFont", font_size)
-        c.setFillColorRGB(0, 0, 0)
-        c.drawCentredString(x_pos, y_pos, bidi_text)
-        c.save()
-        text_layer.seek(0)
-        
-        # قراءة PDF القالب وطبقة النص
-        template_pdf = PdfReader(template_path)
-        text_pdf = PdfReader(text_layer)
-        
-        # دمج الطبقات (Overlay)
-        writer = PdfWriter()
-        page = template_pdf.pages[0]
-        page.merge_page(text_pdf.pages[0])
-        writer.add_page(page)
-        
-        # حفظ الناتج في BytesIO
-        packet = io.BytesIO()
-        writer.write(packet)
-        packet.seek(0)
-
-        # 3. إعداد بيانات الملف للرفع على جوجل درايف
-        file_name = f"شهادة {name}.pdf"
-        file_metadata = {
-            "name": file_name,
-            "parents": [drive_folder_id],
-            "mimeType": "application/pdf",
-        }
-
-        # تنفيذ الرفع
-        media = MediaIoBaseUpload(packet, mimetype='application/pdf', resumable=True)
-        uploaded_file = drive.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id'
-        ).execute()
-
-        # تحديث شريط التقدم
-        progress = (index + 1) / total
-        progress_bar.progress(progress)
-        st.info(f"تم رفع: {file_name}")
-
-    st.balloons()
-    st.success(f"✅ تم الانتهاء! تم إنشاء ورفع {total} شهادة إلى جوجل درايف.")
+            # إنشاء طبقة النص في PDF
+            text_layer = io.BytesIO()
+            c = canvas.Canvas(text_layer, pagesize=landscape(A4))
+            c.setFont("ArabicFont", font_size)
+            c.setFillColorRGB(0, 0, 0)
+            c.drawCentredString(x_pos, y_pos, bidi_text)
+            c.save()
+            text_layer.seek(0)
+            
+            # قراءة طبقة النص والقالب (من bytes)
+            text_pdf = PdfReader(text_layer)
+            template_pdf = PdfReader(io.BytesIO(template_bytes))
+            
+            # دمج الطبقات (Overlay)
+            writer = PdfWriter()
+            page = template_pdf.pages[0]
+            page.merge_page(text_pdf.pages[0])
+            writer.add_page(page)
+            
+            # حفظ الناتج في BytesIO
+            packet = io.BytesIO()
+            writer.write(packet)
+            packet.seek(0)
+            
+            # رفع الملف على Google Drive
+            file_name = f"شهادة {name}.pdf"
+            file_metadata = {
+                "name": file_name,
+                "parents": [drive_folder_id],
+                "mimeType": "application/pdf",
+            }
+            
+            media = MediaIoBaseUpload(packet, mimetype='application/pdf', resumable=True)
+            drive.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id'
+            ).execute()
+            
+            completed += 1
+            
+            # تحديث التقدم (كل 5 شهادات أو الأخيرة)
+            if (index + 1) % 5 == 0 or (index + 1) == total:
+                progress = (index + 1) / total
+                progress_bar.progress(progress)
+                status_text.text(f"تم رفع: {completed}/{total} شهادة")
+                
+        except Exception as e:
+            errors.append(f"خطأ في شهادة {name}: {str(e)}")
+    
+    # عرض النتائج
+    progress_bar.progress(1.0)
+    status_text.empty()
+    
+    if errors:
+        st.warning(f"⚠️ تم رفع {completed} شهادة من {total} مع {len(errors)} خطأ")
+        with st.expander("عرض الأخطاء"):
+            for error in errors:
+                st.caption(error)
+    else:
+        st.balloons()
+        st.success(f"✅ تم الانتهاء! تم إنشاء ورفع {completed} شهادة بنجاح")
+    
+    # عرض رابط المجلد
+    folder_url = f"https://drive.google.com/drive/folders/{drive_folder_id}"
+    st.info(f"📂 **رابط مجلد الشهادات:**")
+    st.code(folder_url, language=None)
+    st.caption("🔗 يمكن مشاركة هذا الرابط مع أي شخص - سيتمكن من رؤية جميع الشهادات")
+    
     shutil.rmtree(FOLDER_NAME, ignore_errors=True)
 
 
@@ -303,9 +288,16 @@ def generate_and_upload(df, template_path, drive, drive_folder_id, x_pos, y_pos,
 
 st.markdown("""
 <style>
+    /* إخفاء sidebar */
+    section[data-testid="stSidebar"] {
+        display: none;
+    }
+    
     /* تحسين المظهر العام */
     .main {
         padding: 2rem 1rem;
+        max-width: 900px;
+        margin: 0 auto;
     }
     
     /* تحسين العنوان */
@@ -313,7 +305,7 @@ st.markdown("""
         text-align: center;
         color: #1f77b4;
         font-size: 2.5rem;
-        margin-bottom: 2rem;
+        margin-bottom: 0.5rem;
         font-weight: 700;
     }
     
@@ -362,23 +354,18 @@ st.markdown("""
         background-color: #f0f2ff;
     }
     
-    /* تحسين sidebar */
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #f8f9fa 0%, #e9ecef 100%);
-        padding: 2rem 1rem;
-    }
-    
-    section[data-testid="stSidebar"] .stButton > button {
-        background-color: #6c757d;
-        font-size: 0.9rem;
-        padding: 0.5rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-    }
-    
-    /* تحسين number inputs */
-    [data-testid="stNumberInput"] {
+    /* تحسين text inputs */
+    [data-testid="stTextInput"] input {
         background-color: white;
         border-radius: 8px;
+        padding: 0.75rem;
+        border: 2px solid #dee2e6;
+        transition: all 0.3s ease;
+    }
+    
+    [data-testid="stTextInput"] input:focus {
+        border-color: #667eea;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
     }
     
     /* تحسين المسافات */
@@ -390,8 +377,9 @@ st.markdown("""
     .stSuccess {
         background-color: #d4edda;
         border-left: 4px solid #28a745;
-        padding: 1rem;
+        padding: 1.5rem;
         border-radius: 8px;
+        margin-top: 2rem;
     }
     
     /* تحسين رسائل الخطأ */
@@ -402,9 +390,27 @@ st.markdown("""
         border-radius: 8px;
     }
     
+    /* تحسين رسائل التحذير */
+    .stWarning {
+        background-color: #fff3cd;
+        border-left: 4px solid #ffc107;
+        padding: 1rem;
+        border-radius: 8px;
+    }
+    
     /* تحسين Progress Bar */
     .stProgress > div > div {
         background-color: #667eea;
+    }
+    
+    /* تحسين مظهر الكود (لينكات) */
+    code {
+        background-color: #f8f9fa;
+        padding: 0.5rem 1rem;
+        border-radius: 6px;
+        display: block;
+        margin: 0.5rem 0;
+        word-break: break-all;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -414,49 +420,12 @@ st.markdown("""
 # ====================================================================
 
 st.title("🎓 مولد الشهادات")
-st.markdown("###")
+st.markdown('<p style="text-align: center; color: #6c757d; margin-bottom: 2rem;">قم برفع ملف الأسماء وقالب PDF لإنشاء الشهادات تلقائياً</p>', unsafe_allow_html=True)
 
-# ====================================================================
-# Sidebar - الإعدادات
-# ====================================================================
-
-st.sidebar.header("⚙️ الإعدادات")
-
-st.sidebar.markdown("---")
-
-# المصادقة
+# المصادقة (بدون عرض رسائل)
 drive_service = authenticate_drive()
 
-# إدخال اسم المجلد
-DRIVE_TARGET_FOLDER = st.sidebar.text_input(
-    "📁 اسم المجلد",
-    value="شهادات الكورس",
-    help="اسم المجلد في Google Drive (سيُنشأ تلقائياً في حسابك)"
-)
-
-# البحث عن/إنشاء المجلد
-drive_folder_id = (
-    find_or_create_folder(drive_service, DRIVE_TARGET_FOLDER) if drive_service else None
-)
-
-# عرض رابط المجلد مع زرار النسخ
-if drive_folder_id:
-    folder_url = f"https://drive.google.com/drive/folders/{drive_folder_id}"
-    
-    st.sidebar.success("✅ المجلد جاهز")
-    
-    # عرض الرابط مع أيقونة النسخ
-    col1, col2 = st.sidebar.columns([4, 1])
-    with col1:
-        st.markdown(f"[🔗 فتح المجلد]({folder_url})")
-    with col2:
-        if st.button("📋", key="copy_link", help="نسخ رابط المجلد"):
-            st.sidebar.code(folder_url, language=None)
-            st.sidebar.caption("✅ انسخ الرابط من الأعلى")
-    
-st.sidebar.markdown("---")
-
-# قسم رفع الملفات - بتصميم columns
+# قسم رفع الملفات
 col1, col2 = st.columns(2)
 
 with col1:
@@ -464,7 +433,8 @@ with col1:
     uploaded_csv = st.file_uploader(
         "CSV أو Excel",
         type=["csv", "xlsx"],
-        help="أول عمود يجب أن يحتوي على الأسماء"
+        help="أول عمود يجب أن يحتوي على الأسماء",
+        label_visibility="collapsed"
     )
 
 with col2:
@@ -472,38 +442,33 @@ with col2:
     uploaded_template = st.file_uploader(
         "ملف PDF القالب",
         type=["pdf"],
-        help="الشهادة الفارغة بدون أسماء"
+        help="الشهادة الفارغة بدون أسماء",
+        label_visibility="collapsed"
     )
 
 st.markdown("###")
 
-# إعدادات الإحداثيات
-st.markdown("### ⚙️ إحداثيات الاسم")
-col1, col2, col3 = st.columns(3)
+# اسم المجلد
+st.markdown("### 📁 اسم مجلد الشهادات")
+DRIVE_TARGET_FOLDER = st.text_input(
+    "اسم المجلد",
+    value="شهادات الكورس",
+    help="سيتم إنشاء مجلد بهذا الاسم في Google Drive",
+    label_visibility="collapsed",
+    placeholder="أدخل اسم المجلد..."
+)
 
-with col1:
-    x_position = st.number_input(
-        "المحاذاة الأفقية (X)",
-        value=421,
-        help="421 = المنتصف"
-    )
-
-with col2:
-    y_position = st.number_input(
-        "الارتفاع (Y)",
-        value=350,
-        help="المسافة من الأسفل"
-    )
-
-with col3:
-    font_size = st.number_input(
-        "حجم الخط",
-        value=40,
-        min_value=10,
-        max_value=120
-    )
+# البحث عن/إنشاء المجلد (بدون رسائل)
+drive_folder_id = None
+if drive_service and DRIVE_TARGET_FOLDER:
+    drive_folder_id = find_or_create_folder(drive_service, DRIVE_TARGET_FOLDER)
 
 st.markdown("###")
+
+# القيم الثابتة للإحداثيات (مخفية)
+x_position = 421
+y_position = 350
+font_size = 40
 
 # زر البدء - كبير وجذاب
 col1, col2, col3 = st.columns([1, 2, 1])
@@ -513,11 +478,11 @@ with col2:
 if start_button:
     # التحقق من المتطلبات
     if drive_service is None:
-        st.error("❌ يرجى المصادقة مع Google Drive أولاً")
+        st.error("❌ لم يتم الاتصال بـ Google Drive. الرجاء التأكد من إعداد OAuth Token")
     elif drive_folder_id is None:
-        st.error(f"❌ فشل الوصول إلى المجلد '{DRIVE_TARGET_FOLDER}'")
+        st.error(f"❌ لم يتم إنشاء المجلد '{DRIVE_TARGET_FOLDER}'. تأكد من اتصالك بالإنترنت")
     elif uploaded_csv is None or uploaded_template is None:
-        st.warning("⚠️ يرجى رفع ملف الأسماء والقالب أولاً")
+        st.warning("⚠️ يرجى رفع ملف الأسماء وقالب PDF أولاً")
     elif not os.path.exists(FONT_PATH):
         st.error(f"❌ ملف الخط العربي غير موجود: {FONT_PATH}")
     else:
