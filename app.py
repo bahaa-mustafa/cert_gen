@@ -19,7 +19,7 @@ from pypdf import PdfReader, PdfWriter
 
 # مكتبات Google Drive API
 from google.auth.transport.requests import Request
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
@@ -35,61 +35,78 @@ st.set_page_config(
 )
 
 
-# دالة قراءة Service Account credentials من Streamlit Secrets أو ملف محلي
-def get_service_account_credentials():
+# دالة قراءة OAuth token من Streamlit Secrets أو ملف محلي
+def get_oauth_token():
     """
-    قراءة Service Account credentials من Streamlit Secrets (للنشر) أو ملف محلي (للتطوير)
+    قراءة OAuth token من Streamlit Secrets (للنشر) أو ملف محلي (للتطوير)
     """
     # محاولة القراءة من Streamlit Secrets (للنشر على Cloud)
     try:
-        if 'service_account' in st.secrets:
-            # تحويل Streamlit secrets إلى dict عادي
-            return dict(st.secrets['service_account'])
+        if 'google_drive_token' in st.secrets:
+            token_str = st.secrets['google_drive_token'].get('token', None)
+            if token_str:
+                return json.loads(token_str)
     except Exception as e:
-        st.sidebar.warning(f"⚠️ خطأ في قراءة Secrets: {str(e)}")
+        pass
     
     # إذا لم توجد secrets، اقرأ من ملف محلي (للتطوير)
-    if os.path.exists('client_secrets.json'):
-        with open('client_secrets.json', 'r') as f:
+    if os.path.exists('token.json'):
+        with open('token.json', 'r') as f:
             return json.load(f)
     
     return None
 
 
-# دالة الاتصال بجوجل درايف باستخدام Service Account
+# دالة الاتصال بجوجل درايف باستخدام OAuth Token
 @st.cache_resource
 def authenticate_drive():
     """
-    مصادقة مع Google Drive باستخدام Service Account
-    يعمل على Streamlit Cloud والتنمية المحلية بدون الحاجة لمتصفح
+    مصادقة مع Google Drive باستخدام OAuth Token
+    يعمل على Streamlit Cloud والتنمية المحلية
     """
     try:
-        # قراءة Service Account credentials
-        service_account_info = get_service_account_credentials()
+        # قراءة OAuth token
+        token_info = get_oauth_token()
         
-        if not service_account_info:
-            st.sidebar.error("❌ ملف Service Account غير موجود")
+        if not token_info:
+            st.sidebar.error("❌ OAuth Token غير موجود")
             with st.sidebar.expander("كيفية الإعداد"):
                 st.markdown("""
                 **للتنمية المحلية:**
-                1. افتح [Google Cloud Console](https://console.cloud.google.com/)
-                2. أنشئ Service Account
-                3. نزّل الملف JSON وسمّه `client_secrets.json`
-                4. ضعه في مجلد التطبيق
+                1. شغّل: `python generate_token.py`
+                2. سجّل دخول بحساب Google
+                3. سيُنشأ ملف `token.json`
                 
                 **للنشر على Streamlit Cloud:**
-                راجع ملف `DEPLOYMENT.md` لإعداد Streamlit Secrets
+                1. ولّد token محلياً (الخطوة أعلاه)
+                2. انسخ محتوى `token.json`
+                3. أضفه في Streamlit Secrets
+                
+                راجع ملف `TOKEN_SETUP.md` للتفاصيل
                 """)
             return None
         
-        # استخدام scope كامل للـ Drive (Service Account يحتاج صلاحيات أوسع)
-        SCOPES = ['https://www.googleapis.com/auth/drive']
+        # استخدام scope محدد للملفات فقط
+        SCOPES = ['https://www.googleapis.com/auth/drive.file']
         
-        # إنشاء credentials من Service Account
-        creds = service_account.Credentials.from_service_account_info(
-            service_account_info, 
-            scopes=SCOPES
-        )
+        # إنشاء credentials من token
+        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+        
+        # التحقق من صلاحية token وتجديده إذا لزم الأمر
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                # حفظ token المُجدّد
+                token_json = json.loads(creds.to_json())
+                if os.path.exists('token.json'):
+                    with open('token.json', 'w') as token_file:
+                        json.dump(token_json, token_file)
+                st.sidebar.info("🔄 تم تجديد Token تلقائياً")
+            except Exception as refresh_error:
+                st.sidebar.error("❌ فشل تجديد Token")
+                st.sidebar.caption(f"الخطأ: {refresh_error}")
+                st.sidebar.info("💡 جرّب توليد token جديد")
+                return None
         
         # بناء service object
         service = build('drive', 'v3', credentials=creds)
@@ -104,43 +121,10 @@ def authenticate_drive():
         return None
 
 
-# دالة مشاركة المجلد مع بريد إلكتروني
-def share_folder_with_email(service, folder_id: str, email: str):
-    """
-    مشاركة مجلد في Google Drive مع بريد إلكتروني محدد
-    """
-    if not service or not folder_id or not email:
-        return False
-    
-    try:
-        # إعداد صلاحيات المشاركة
-        permission = {
-            'type': 'user',
-            'role': 'writer',  # صلاحيات كتابة وقراءة
-            'emailAddress': email
-        }
-        
-        # تنفيذ المشاركة
-        service.permissions().create(
-            fileId=folder_id,
-            body=permission,
-            fields='id',
-            sendNotificationEmail=True  # إرسال إشعار بالبريد
-        ).execute()
-        
-        st.sidebar.success(f"✅ تمت مشاركة المجلد مع: {email}")
-        return True
-        
-    except Exception as e:
-        st.sidebar.error(f"⚠️ فشلت المشاركة: {str(e)}")
-        return False
-
-
 # دالة البحث عن مجلد أو إنشاؤه في Google Drive
-def find_or_create_folder(service, folder_name: str, share_with_email: str = None):
+def find_or_create_folder(service, folder_name: str):
     """
     البحث عن مجلد في Google Drive، وإنشاؤه إذا لم يكن موجوداً
-    يمكن مشاركته تلقائياً مع بريد إلكتروني
     """
     if service is None:
         return None
@@ -161,11 +145,6 @@ def find_or_create_folder(service, folder_name: str, share_with_email: str = Non
         if files:
             folder_id = files[0]['id']
             st.sidebar.success(f"✅ تم العثور على المجلد: {folder_name}")
-            
-            # مشاركة المجلد إذا تم تحديد بريد إلكتروني
-            if share_with_email and share_with_email.strip():
-                share_folder_with_email(service, folder_id, share_with_email.strip())
-            
             return folder_id
         
         # المجلد غير موجود - إنشاؤه
@@ -181,10 +160,6 @@ def find_or_create_folder(service, folder_name: str, share_with_email: str = Non
         
         folder_id = folder.get('id')
         st.sidebar.success(f"✨ تم إنشاء المجلد الجديد: {folder_name}")
-        
-        # مشاركة المجلد إذا تم تحديد بريد إلكتروني
-        if share_with_email and share_with_email.strip():
-            share_folder_with_email(service, folder_id, share_with_email.strip())
         
         return folder_id
         
@@ -417,19 +392,12 @@ drive_service = authenticate_drive()
 DRIVE_TARGET_FOLDER = st.sidebar.text_input(
     "📁 اسم المجلد",
     value="شهادات الكورس",
-    help="اسم المجلد في Google Drive (سيُنشأ تلقائياً إذا لم يكن موجوداً)"
+    help="اسم المجلد في Google Drive (سيُنشأ تلقائياً في حسابك)"
 )
 
-# إدخال البريد الإلكتروني لمشاركة المجلد (اختياري)
-user_email = st.sidebar.text_input(
-    "📧 بريدك الإلكتروني (اختياري)",
-    placeholder="example@gmail.com",
-    help="لمشاركة المجلد معك تلقائياً (يعمل مع Service Account)"
-)
-
-# البحث عن/إنشاء المجلد (مع المشاركة إذا تم إدخال بريد)
+# البحث عن/إنشاء المجلد
 drive_folder_id = (
-    find_or_create_folder(drive_service, DRIVE_TARGET_FOLDER, user_email) if drive_service else None
+    find_or_create_folder(drive_service, DRIVE_TARGET_FOLDER) if drive_service else None
 )
 
 # عرض رابط المجلد مع زرار النسخ
