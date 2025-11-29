@@ -3,6 +3,7 @@ import pandas as pd
 import io
 import os
 import shutil
+import json
 
 
 # مكتبات توليد الـ PDF
@@ -35,52 +36,120 @@ st.set_page_config(
 )
 
 
+# دالة قراءة OAuth credentials من Streamlit Secrets أو ملف محلي
+def get_oauth_credentials():
+    """
+    قراءة OAuth credentials من Streamlit Secrets (للنشر) أو ملف محلي (للتنمية)
+    """
+    import json
+    
+    # محاولة القراءة من Streamlit Secrets (للنشر على Cloud)
+    try:
+        if 'oauth_credentials' in st.secrets:
+            creds_dict = st.secrets['oauth_credentials']
+            # تحويل إلى JSON string ثم إلى dict
+            if isinstance(creds_dict, dict):
+                return creds_dict
+            elif isinstance(creds_dict, str):
+                return json.loads(creds_dict)
+    except:
+        pass
+    
+    # إذا لم توجد secrets، اقرأ من ملف محلي (للتنمية)
+    if os.path.exists('oauth_credentials.json'):
+        with open('oauth_credentials.json', 'r') as f:
+            return json.load(f)
+    
+    return None
+
+
 # دالة الاتصال بجوجل درايف باستخدام OAuth 2.0
 @st.cache_resource
 def authenticate_drive():
     """
     مصادقة المستخدم مع Google Drive باستخدام OAuth 2.0
-    المستخدم يسجل دخول بحسابه الشخصي مرة واحدة فقط
+    يدعم النشر على Streamlit Cloud والتنمية المحلية
     """
     try:
         # استخدام scope محدد للملفات والمجلدات فقط
         SCOPES = ['https://www.googleapis.com/auth/drive.file']
         creds = None
         
-        # التحقق من وجود token محفوظ من قبل
-        if os.path.exists('token.json'):
-            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        # محاولة قراءة token من session state (للنشر على Cloud)
+        if 'drive_token' in st.session_state:
+            try:
+                creds = Credentials.from_authorized_user_info(
+                    st.session_state['drive_token'], SCOPES)
+            except:
+                pass
+        
+        # إذا لم يكن في session state، جرب قراءة من ملف (للتنمية المحلية)
+        if not creds and os.path.exists('token.json'):
+            try:
+                creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+            except:
+                pass
         
         # إذا لم توجد credentials صالحة، نطلب من المستخدم تسجيل الدخول
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 # تجديد التوكن إذا انتهت صلاحيته
-                creds.refresh(Request())
-                st.sidebar.info("🔄 تم تجديد صلاحية الاتصال تلقائياً")
-            else:
-                # التحقق من وجود ملف OAuth credentials
-                if not os.path.exists('oauth_credentials.json'):
+                try:
+                    creds.refresh(Request())
+                    st.sidebar.info("🔄 تم تجديد صلاحية الاتصال تلقائياً")
+                except:
+                    creds = None  # إذا فشل التجديد، ابدأ من جديد
+            
+            if not creds:
+                # قراءة OAuth credentials
+                oauth_creds = get_oauth_credentials()
+                if not oauth_creds:
                     st.sidebar.error("❌ ملف OAuth غير موجود")
                     with st.sidebar.expander("كيفية الإعداد"):
                         st.markdown("""
+                        **للتنمية المحلية:**
                         1. افتح [Google Cloud Console](https://console.cloud.google.com/)
-                        2. أنشئ OAuth Client ID
+                        2. أنشئ OAuth Client ID (Desktop app)
                         3. نزّل الملف وسمّه `oauth_credentials.json`
                         4. ضعه في مجلد التطبيق
+                        
+                        **للنشر على Streamlit Cloud:**
+                        راجع ملف `DEPLOYMENT.md` لإعداد Streamlit Secrets
                         """)
                     return None
                 
-                # تسجيل دخول جديد
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    'oauth_credentials.json', SCOPES)
+                # إنشاء OAuth flow
+                # حفظ credentials مؤقتاً في ملف للاستخدام مع InstalledAppFlow
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
+                    json.dump(oauth_creds, tmp)
+                    tmp_path = tmp.name
                 
-                # فتح المتصفح لتسجيل الدخول
-                st.sidebar.info("⏳ افتح المتصفح لتسجيل الدخول...")
-                creds = flow.run_local_server(port=0)
+                try:
+                    flow = InstalledAppFlow.from_client_secrets_file(tmp_path, SCOPES)
+                    
+                    # فتح المتصفح لتسجيل الدخول (يعمل محلياً فقط)
+                    st.sidebar.info("⏳ افتح المتصفح لتسجيل الدخول...")
+                    creds = flow.run_local_server(port=0)
+                finally:
+                    # حذف الملف المؤقت
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
             
-            # حفظ الـ credentials للمرات القادمة
-            with open('token.json', 'w') as token:
-                token.write(creds.to_json())
+            # حفظ الـ credentials
+            creds_dict = json.loads(creds.to_json())
+            
+            # حفظ في session state (للنشر على Cloud)
+            st.session_state['drive_token'] = creds_dict
+            
+            # حفظ في ملف (للتنمية المحلية)
+            try:
+                with open('token.json', 'w') as token:
+                    token.write(creds.to_json())
+            except:
+                pass  # قد يفشل على Cloud إذا لم تكن هناك صلاحيات كتابة
         
         # بناء service object
         service = build('drive', 'v3', credentials=creds)
