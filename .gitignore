@@ -23,6 +23,7 @@ ENV/
 
 # Generated certificates (temporary)
 Generated_Certificates_Batch/
+temp_template.pdf
 temp_template.jpg
 
 # IDE
