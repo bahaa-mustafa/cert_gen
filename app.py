@@ -46,14 +46,21 @@ def get_oauth_credentials():
     # محاولة القراءة من Streamlit Secrets (للنشر على Cloud)
     try:
         if 'oauth_credentials' in st.secrets:
-            creds_dict = st.secrets['oauth_credentials']
-            # تحويل إلى JSON string ثم إلى dict
-            if isinstance(creds_dict, dict):
-                return creds_dict
-            elif isinstance(creds_dict, str):
-                return json.loads(creds_dict)
-    except:
-        pass
+            oauth_secret = st.secrets['oauth_credentials']
+            
+            # حالة 1: يوجد مفتاح 'installed' (الصيغة الموصى بها)
+            if 'installed' in oauth_secret:
+                installed_value = oauth_secret['installed']
+                if isinstance(installed_value, str):
+                    # Parse JSON string
+                    return {'installed': json.loads(installed_value)}
+                else:
+                    return {'installed': dict(installed_value)}
+            
+            # حالة 2: البيانات مباشرة في oauth_secret
+            return dict(oauth_secret)
+    except Exception as e:
+        st.sidebar.warning(f"⚠️ خطأ في قراءة Secrets: {str(e)}")
     
     # إذا لم توجد secrets، اقرأ من ملف محلي (للتنمية)
     if os.path.exists('oauth_credentials.json'):
