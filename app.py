@@ -4,6 +4,7 @@ import io
 import os
 import shutil
 
+
 # مكتبات توليد الـ PDF
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import landscape, A4
@@ -12,9 +13,12 @@ from reportlab.pdfbase.ttfonts import TTFont
 import arabic_reshaper
 from bidi.algorithm import get_display
 
-# مكتبة Google Drive
-from pydrive2.auth import GoogleAuth
-from pydrive2.drive import GoogleDrive
+# مكتبات Google Drive API
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
 # 1. الإعدادات الأساسية
 FONT_PATH = "Amiri-Bold.ttf"  # اسم ملف الخط العربي (يكون بجانب app.py)
@@ -23,54 +27,106 @@ FOLDER_NAME = "Generated_Certificates_Batch"  # اسم المجلد المؤقت
 st.set_page_config(page_title="مولد الشهادات والرفع على درايف", layout="centered")
 
 
-# دالة الاتصال بجوجل درايف باستخدام Service Account
+# دالة الاتصال بجوجل درايف باستخدام OAuth 2.0
 @st.cache_resource
 def authenticate_drive():
+    """
+    مصادقة المستخدم مع Google Drive باستخدام OAuth 2.0
+    المستخدم يسجل دخول بحسابه الشخصي مرة واحدة فقط
+    """
     try:
-        # تهيئة GoogleAuth واستخدام حساب الخدمة من ملف client_secrets.json
-        # ملف client_secrets.json هو ملف الـ Service Account JSON
-        gauth = GoogleAuth(
-            settings={
-                "client_config_backend": "service",
-                "service_config": {
-                    "client_json_file_path": "client_secrets.json",
-                },
-                "save_credentials": True,
-                "save_credentials_backend": "file",
-                "save_credentials_file": "mycreds.txt",
-            }
-        )
-
-        # مصادقة بحساب الخدمة
-        gauth.ServiceAuth()
-        drive = GoogleDrive(gauth)
-
-        st.sidebar.success("✅ تم الاتصال بجوجل درايف بنجاح بحساب الخدمة!")
-        return drive
+        SCOPES = ['https://www.googleapis.com/auth/drive.file']
+        creds = None
+        
+        # التحقق من وجود token محفوظ من قبل
+        if os.path.exists('token.json'):
+            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        
+        # إذا لم توجد credentials صالحة، نطلب من المستخدم تسجيل الدخول
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                # تجديد التوكن إذا انتهت صلاحيته
+                creds.refresh(Request())
+                st.sidebar.info("🔄 تم تجديد صلاحية الاتصال تلقائياً")
+            else:
+                # التحقق من وجود ملف OAuth credentials
+                if not os.path.exists('oauth_credentials.json'):
+                    st.sidebar.error(
+                        "❌ **ملف OAuth غير موجود!**\n\n"
+                        "يرجى إنشاء OAuth Credentials من Google Cloud Console "
+                        "وتنزيل الملف باسم `oauth_credentials.json` ووضعه في مجلد التطبيق.\n\n"
+                        "راجع التعليمات في الأسفل."
+                    )
+                    return None
+                
+                # تسجيل دخول جديد
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    'oauth_credentials.json', SCOPES)
+                
+                # فتح المتصفح لتسجيل الدخول
+                st.sidebar.warning("⏳ يرجى تسجيل الدخول في المتصفح الذي سيفتح تلقائياً...")
+                creds = flow.run_local_server(port=0)
+            
+            # حفظ الـ credentials للمرات القادمة
+            with open('token.json', 'w') as token:
+                token.write(creds.to_json())
+        
+        # بناء service object
+        service = build('drive', 'v3', credentials=creds)
+        
+        st.sidebar.success("✅ تم الاتصال بجوجل درايف بنجاح!")
+        return service
 
     except Exception as e:
         st.sidebar.error(
-            "❌ خطأ في الاتصال بالدرايف. تأكد من وجود ملف client_secrets.json ومن إعدادات حساب الخدمة."
+            "❌ خطأ في الاتصال بالدرايف. يرجى التحقق من الإعدادات."
         )
         st.sidebar.caption(f"الخطأ التقني: {e}")
         return None
 
 
-# دالة البحث عن مجلد معين في درايف بالاسم
-def find_drive_folder(drive, folder_name: str):
-    if drive is None:
+# دالة البحث عن مجلد أو إنشاؤه في Google Drive
+def find_or_create_folder(service, folder_name: str):
+    """
+    البحث عن مجلد في Google Drive، وإنشاؤه إذا لم يكن موجوداً
+    """
+    if service is None:
         return None
 
     try:
+        # البحث عن المجلد
         query = (
-            f"title='{folder_name}' and "
+            f"name='{folder_name}' and "
             "mimeType='application/vnd.google-apps.folder' and trashed=false"
         )
-        file_list = drive.ListFile({"q": query}).GetList()
-        if file_list:
-            return file_list[0]["id"]
-        return None
-    except Exception:
+        results = service.files().list(
+            q=query,
+            spaces='drive',
+            fields='files(id, name)'
+        ).execute()
+        
+        files = results.get('files', [])
+        if files:
+            st.sidebar.success(f"✅ تم العثور على المجلد: {folder_name}")
+            return files[0]['id']
+        
+        # المجلد غير موجود - إنشاؤه
+        file_metadata = {
+            'name': folder_name,
+            'mimeType': 'application/vnd.google-apps.folder'
+        }
+        
+        folder = service.files().create(
+            body=file_metadata,
+            fields='id'
+        ).execute()
+        
+        folder_id = folder.get('id')
+        st.sidebar.success(f"✨ تم إنشاء المجلد الجديد: {folder_name}")
+        return folder_id
+        
+    except Exception as e:
+        st.sidebar.error(f"❌ خطأ في البحث/الإنشاء للمجلد: {e}")
         return None
 
 
@@ -116,15 +172,18 @@ def generate_and_upload(df, template_path, drive, drive_folder_id, x_pos, y_pos,
         # 3. إعداد بيانات الملف للرفع على جوجل درايف
         file_name = f"شهادة {name}.pdf"
         file_metadata = {
-            "title": file_name,
-            "parents": [{"id": drive_folder_id}],
+            "name": file_name,
+            "parents": [drive_folder_id],
             "mimeType": "application/pdf",
         }
 
         # تنفيذ الرفع
-        file = drive.CreateFile(file_metadata)
-        file.content = packet
-        file.Upload()
+        media = MediaIoBaseUpload(packet, mimetype='application/pdf', resumable=True)
+        uploaded_file = drive.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id'
+        ).execute()
 
         # تحديث شريط التقدم
         progress = (index + 1) / total
@@ -141,30 +200,49 @@ def generate_and_upload(df, template_path, drive, drive_folder_id, x_pos, y_pos,
 # ====================================================================
 
 st.title("🎓 أداة إنشاء ورفع الشهادات التلقائي")
+
+# معلومات عن التطبيق
+st.info(
+    "📌 **مرحباً بك!** هذا التطبيق يساعدك على:\n\n"
+    "✅ توليد شهادات PDF بأسماء مختلفة\n"
+    "✅ رفعها تلقائياً إلى Google Drive\n"
+    "✅ إنشاء مجلدات تلقائياً إذا لم تكن موجودة\n\n"
+    "💡 **أول استخدام:** سيُطلب منك تسجيل الدخول بحسابك على Google مرة واحدة فقط."
+)
 st.markdown("---")
 
 # المصادقة في الشريط الجانبي أولاً
+st.sidebar.title("⚙️ الإعدادات")
+
+# تعليمات OAuth في حالة عدم وجود credentials
+if not os.path.exists('oauth_credentials.json') and not os.path.exists('token.json'):
+    with st.sidebar.expander("📖 تعليمات الإعداد الأول", expanded=True):
+        st.markdown("""
+        **للاستخدام لأول مرة:**
+        
+        1. أنشئ OAuth Client ID من [Google Cloud Console](https://console.cloud.google.com/)
+        2. نزّل ملف JSON وسمّه `oauth_credentials.json`
+        3. ضعه في مجلد التطبيق
+        4. أعد تحميل الصفحة
+        
+        📄 راجع [`QUICKSTART.md`](./QUICKSTART.md) للتفاصيل الكاملة
+        """)
+
 drive_service = authenticate_drive()
 
 DRIVE_TARGET_FOLDER = st.sidebar.text_input(
-    "اسم مجلد درايف الهدف:",
+    "📁 اسم مجلد درايف الهدف:",
     value="شهادات الكورس",
 )
 
 drive_folder_id = (
-    find_drive_folder(drive_service, DRIVE_TARGET_FOLDER) if drive_service else None
+    find_or_create_folder(drive_service, DRIVE_TARGET_FOLDER) if drive_service else None
 )
 
 if drive_folder_id:
     st.sidebar.info(
-        f"💡 سيتم الرفع إلى المجلد: {DRIVE_TARGET_FOLDER}\n(ID: {drive_folder_id})"
+        f"📁 المجلد الهدف: {DRIVE_TARGET_FOLDER}\n(ID: {drive_folder_id})"
     )
-else:
-    if drive_service:
-        st.sidebar.warning(
-            f"⚠️ لم يتم العثور على المجلد '{DRIVE_TARGET_FOLDER}' في درايف.\n"
-            "تأكد من وجوده ومشاركته مع بريد حساب الخدمة بصلاحية Editor."
-        )
 
 # قسم رفع الملفات
 st.header("1. البيانات والقالب")
@@ -195,12 +273,13 @@ with st.expander("2. ضبط إحداثيات الاسم (المكان والحج
 if st.button("🚀 بدء عملية التوليد والرفع", type="primary"):
     if drive_service is None:
         st.error(
-            "يرجى حل مشكلة الاتصال بجوجل درايف أولاً (تأكد من ملف client_secrets.json)."
+            "❌ يرجى إكمال عملية المصادقة مع Google Drive أولاً.\n\n"
+            "تأكد من وجود ملف `oauth_credentials.json` في مجلد التطبيق."
         )
     elif drive_folder_id is None:
         st.error(
-            f"يرجى التأكد من اسم مجلد درايف الهدف '{DRIVE_TARGET_FOLDER}' "
-            "ومشاركته مع حساب الخدمة بصلاحية Editor."
+            f"❌ فشل إنشاء/الوصول إلى المجلد '{DRIVE_TARGET_FOLDER}'.\n\n"
+            "يرجى التحقق من اتصالك بالإنترنت والمحاولة مرة أخرى."
         )
     elif uploaded_csv is None or uploaded_template is None:
         st.warning("الرجاء رفع ملف الأسماء وقالب الشهادة أولاً.")

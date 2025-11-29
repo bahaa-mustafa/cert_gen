@@ -1,1 +1,33 @@
+# Google OAuth Credentials
+oauth_credentials.json
+token.json
+mycreds.txt
+
+# Old Service Account file (legacy)
 client_secrets.json
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+venv/
+env/
+ENV/
+.venv/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Generated certificates (temporary)
+Generated_Certificates_Batch/
+temp_template.jpg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
