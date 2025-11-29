@@ -121,10 +121,42 @@ def authenticate_drive():
         return None
 
 
+# دالة جعل المجلد عاماً (مشارك مع أي حد معاه الرابط)
+def make_folder_public(service, folder_id: str):
+    """
+    جعل المجلد مشاركاً بشكل عام - أي حد معاه اللينك يقدر يشوفه
+    """
+    if not service or not folder_id:
+        return False
+    
+    try:
+        # إعداد صلاحيات المشاركة العامة
+        permission = {
+            'type': 'anyone',  # أي حد
+            'role': 'reader',  # صلاحيات القراءة فقط
+        }
+        
+        # تطبيق المشاركة
+        service.permissions().create(
+            fileId=folder_id,
+            body=permission,
+            fields='id'
+        ).execute()
+        
+        st.sidebar.info("🔗 المجلد مشارك مع أي حد معاه الرابط")
+        return True
+        
+    except Exception as e:
+        # ممكن يكون المجلد عام بالفعل
+        st.sidebar.caption(f"ملاحظة: {str(e)}")
+        return False
+
+
 # دالة البحث عن مجلد أو إنشاؤه في Google Drive
 def find_or_create_folder(service, folder_name: str):
     """
     البحث عن مجلد في Google Drive، وإنشاؤه إذا لم يكن موجوداً
+    المجلد يكون مشارك بشكل عام (أي حد معاه الرابط يقدر يفتحه)
     """
     if service is None:
         return None
@@ -145,6 +177,10 @@ def find_or_create_folder(service, folder_name: str):
         if files:
             folder_id = files[0]['id']
             st.sidebar.success(f"✅ تم العثور على المجلد: {folder_name}")
+            
+            # جعل المجلد عاماً (في حالة لم يكن كذلك)
+            make_folder_public(service, folder_id)
+            
             return folder_id
         
         # المجلد غير موجود - إنشاؤه
@@ -160,6 +196,9 @@ def find_or_create_folder(service, folder_name: str):
         
         folder_id = folder.get('id')
         st.sidebar.success(f"✨ تم إنشاء المجلد الجديد: {folder_name}")
+        
+        # جعل المجلد عاماً
+        make_folder_public(service, folder_id)
         
         return folder_id
         
